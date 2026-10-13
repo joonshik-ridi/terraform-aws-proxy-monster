@@ -6,6 +6,20 @@ data "aws_subnet" "private" {
 }
 
 locals {
+  athena_glue_guard_statements = {
+    for key, ds in var.datasources : key => concat(
+      !ds.athena.lake_formation ? [] : [{
+        actions   = ["lakeformation:GetDataAccess"]
+        resources = ["*"]
+      }],
+      length(ds.athena.denied_glue_resources) == 0 ? [] : [{
+        effect    = "Deny"
+        actions   = ["glue:*"]
+        resources = [for resource in ds.athena.denied_glue_resources : "arn:aws:glue:${local.aws_region}:${local.aws_account_id}:${resource}"]
+      }],
+    ) if ds.engine == "athena"
+  }
+
   control_plane_environment = concat(
     [
       { name = "PM_HTTP_PORT", value = "8080" },
@@ -558,15 +572,7 @@ module "ecs" {
               resources = ["arn:aws:s3:::${ds.athena.result_prefix}*"]
             },
           ],
-          !ds.athena.lake_formation ? [] : [{
-            actions   = ["lakeformation:GetDataAccess"]
-            resources = ["*"]
-          }],
-          length(ds.athena.denied_glue_resources) == 0 ? [] : [{
-            effect    = "Deny"
-            actions   = ["glue:*"]
-            resources = [for resource in ds.athena.denied_glue_resources : "arn:aws:glue:${local.aws_region}:${local.aws_account_id}:${resource}"]
-          }],
+          local.athena_glue_guard_statements[key],
         )
 
         # Deterministic name so policies can carry it as a literal ARN; a reference would cycle.

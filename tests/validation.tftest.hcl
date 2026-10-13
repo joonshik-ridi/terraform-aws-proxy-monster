@@ -309,6 +309,38 @@ run "athena_denied_glue_resources_plan" {
       }
     }
   }
+  assert {
+    condition = local.athena_glue_guard_statements["dw"] == [
+      { actions = ["lakeformation:GetDataAccess"], resources = ["*"] },
+      {
+        effect  = "Deny"
+        actions = ["glue:*"]
+        resources = [
+          "arn:aws:glue:us-east-1:111111111111:database/scratch",
+          "arn:aws:glue:us-east-1:111111111111:table/logs/signin_*",
+          "arn:aws:glue:us-east-1:111111111111:table/*/email_sent",
+        ]
+      },
+    ]
+    error_message = "lake_formation and denied_glue_resources must add a GetDataAccess allow and a glue:* Deny on the listed ARNs in this account and region."
+  }
+}
+
+run "athena_without_glue_guards_adds_no_statements" {
+  command = plan
+  variables {
+    datasources = {
+      dw = {
+        engine    = "athena"
+        wire_port = 40002
+        athena    = { workgroup = "primary", database = "logs", result_prefix = "results-bucket/athena/", data_prefixes = ["data-bucket/warehouse/"] }
+      }
+    }
+  }
+  assert {
+    condition     = local.athena_glue_guard_statements["dw"] == []
+    error_message = "With neither lake_formation nor denied_glue_resources set, no Lake Formation or Deny statement is added."
+  }
 }
 
 run "athena_denied_glue_resource_without_kind_is_rejected" {
@@ -331,7 +363,7 @@ run "athena_denied_glue_resource_without_kind_is_rejected" {
   expect_failures = [var.datasources]
 }
 
-run "athena_denied_glue_resource_with_catalog_arn_is_rejected" {
+run "athena_denied_glue_resource_as_full_arn_is_rejected" {
   command = plan
   variables {
     datasources = {
@@ -344,6 +376,66 @@ run "athena_denied_glue_resource_with_catalog_arn_is_rejected" {
           result_prefix         = "results-bucket/athena/"
           data_prefixes         = ["data-bucket/warehouse/"]
           denied_glue_resources = ["arn:aws:glue:us-east-1:111111111111:table/logs/email_sent"]
+        }
+      }
+    }
+  }
+  expect_failures = [var.datasources]
+}
+
+run "athena_denied_glue_catalog_is_rejected" {
+  command = plan
+  variables {
+    datasources = {
+      dw = {
+        engine    = "athena"
+        wire_port = 40002
+        athena = {
+          workgroup             = "primary"
+          database              = "logs"
+          result_prefix         = "results-bucket/athena/"
+          data_prefixes         = ["data-bucket/warehouse/"]
+          denied_glue_resources = ["catalog"]
+        }
+      }
+    }
+  }
+  expect_failures = [var.datasources]
+}
+
+run "athena_denied_glue_resource_in_upper_case_is_rejected" {
+  command = plan
+  variables {
+    datasources = {
+      dw = {
+        engine    = "athena"
+        wire_port = 40002
+        athena = {
+          workgroup             = "primary"
+          database              = "logs"
+          result_prefix         = "results-bucket/athena/"
+          data_prefixes         = ["data-bucket/warehouse/"]
+          denied_glue_resources = ["table/logs/Email_Sent"]
+        }
+      }
+    }
+  }
+  expect_failures = [var.datasources]
+}
+
+run "athena_denied_glue_resource_with_trailing_space_is_rejected" {
+  command = plan
+  variables {
+    datasources = {
+      dw = {
+        engine    = "athena"
+        wire_port = 40002
+        athena = {
+          workgroup             = "primary"
+          database              = "logs"
+          result_prefix         = "results-bucket/athena/"
+          data_prefixes         = ["data-bucket/warehouse/"]
+          denied_glue_resources = ["table/logs/email_sent "]
         }
       }
     }
