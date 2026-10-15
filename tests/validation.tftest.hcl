@@ -649,12 +649,29 @@ run "tailscale_edge_forwards_with_proxy_protocol_to_caddy" {
     error_message = "With edge, the tailscale node must wait for a healthy Caddy before it advertises the Service."
   }
   assert {
-    condition     = local.edge_health_checks["cp-http"].path == "/health" && strcontains(local.edge_caddyfile, "@control_plane path ${join(" ", local.console_control_plane_paths)}")
+    condition     = local.edge_health_checks["cp-http"].path == "/health" && strcontains(local.edge_caddyfile, "path ${join(" ", local.console_control_plane_paths)}") && strcontains(local.edge_caddyfile, "not path ${join(" ", local.console_web_paths)}")
     error_message = "The edge must health-check the control plane on /health and route the same paths as the console ALB."
   }
   assert {
     condition     = length(module.edge_redeploy) == 1
     error_message = "With edge, a schedule must restart the host so a renewed certificate is exported."
+  }
+}
+
+run "reauth_complete_page_goes_to_web" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+  }
+  assert {
+    condition = alltrue([
+      module.console_alb.listener_rules["https/web-page"].priority == 90,
+      module.console_alb.listener_rules["https/control-plane"].priority > 90,
+      one(module.console_alb.listener_rules["https/web-page"].condition).path_pattern[0].values == toset(["/auth/reauth-complete"]),
+    ])
+    error_message = "The console ALB must send /auth/reauth-complete to web ahead of the /auth/* control-plane rule."
   }
 }
 
@@ -746,4 +763,273 @@ run "tailscale_edge_certificate_must_be_in_the_module_region" {
     }
   }
   expect_failures = [aws_vpc_security_group_ingress_rule.edge_nlb_from_tailscale]
+}
+
+run "tailnet_null_adds_nothing" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+  }
+  assert {
+    condition = alltrue([
+      length([for e in local.control_plane_environment : e if startswith(e.name, "PM_TAILNET_") || e.name == "PM_WEB_URL"]) == 0,
+      !contains(keys(module.internal_nlb.listeners), "web"),
+      output.control_plane_task_role_arn == null,
+      length(data.aws_acm_certificate.tailnet) == 0,
+    ])
+    error_message = "A null tailnet must leave the control plane, the internal NLB and the outputs as they were."
+  }
+}
+
+run "tailnet_serves_the_console_from_the_control_plane" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    tailnet = {
+      client_id    = "example-client-id"
+      tag          = "tag:pm-console-host"
+      service_name = "svc:pm-console"
+    }
+  }
+  assert {
+    condition = alltrue([
+      contains(local.control_plane_environment, { name = "AWS_REGION", value = "us-east-1" }),
+      contains(local.control_plane_environment, { name = "PM_TAILNET_CLIENT_ID", value = "example-client-id" }),
+      contains(local.control_plane_environment, { name = "PM_TAILNET_AUDIENCE", value = "tailscale.workload.identity" }),
+      contains(local.control_plane_environment, { name = "PM_TAILNET_TAGS", value = "tag:pm-console-host" }),
+      contains(local.control_plane_environment, { name = "PM_TAILNET_SERVICE", value = "svc:pm-console" }),
+      data.aws_acm_certificate.tailnet[0].domain == var.console_hostname,
+      contains(local.control_plane_environment, { name = "PM_TAILNET_CERT_ARN", value = data.aws_acm_certificate.tailnet[0].arn }),
+      contains([for e in local.control_plane_environment : e.name], "PM_WEB_URL"),
+    ])
+    error_message = "The control plane must log in with client_id, advertise its tag, host the Service with the certificate, and forward web paths to web."
+  }
+  assert {
+    condition = alltrue([
+      contains(keys(module.internal_nlb.listeners), "web"),
+      local.web_tailnet_load_balancer["nlb-http"].container_name == "web",
+      local.web_tailnet_load_balancer["nlb-http"].container_port == 41300,
+      module.internal_nlb.target_groups["web"].port == 41300,
+    ])
+    error_message = "The web service must register on the internal NLB's web listener, which the control plane forwards to."
+  }
+  assert {
+    condition     = module.ecs.services["control-plane"].tasks_iam_role_name == "proxy-monster-control-plane-tasks" && output.control_plane_task_role_arn == "arn:aws:iam::111111111111:role/proxy-monster-control-plane-tasks"
+    error_message = "The role ARN must be known at plan time so a caller can trust it before the role exists."
+  }
+  assert {
+    condition     = !contains(keys(module.ecs.services), "proxy-monster-tailscale")
+    error_message = "tailnet must not add the tailscale host service."
+  }
+}
+
+run "tailnet_tag_must_be_a_tag" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    tailnet = {
+      client_id    = "example-client-id"
+      tag          = "pm-console-host"
+      service_name = "svc:pm-console"
+    }
+  }
+  expect_failures = [var.tailnet]
+}
+
+run "tailnet_service_name_must_be_a_dns_label" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    tailnet = {
+      client_id    = "example-client-id"
+      tag          = "tag:pm-console-host"
+      service_name = "pm-console"
+    }
+  }
+  expect_failures = [var.tailnet]
+}
+
+run "user_attributes_unset_emits_nothing" {
+  command = plan
+  variables {
+    datasources = { app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } } }
+    oidc        = { issuer = "https://idp.example.com", client_id = "pm", group_map = "pm-admins=system:admin" }
+  }
+  assert {
+    condition     = length([for env in module.ecs.services["control-plane"].container_definitions["control-plane"].container_definition.environment : env if env.name == "PM_OIDC_USER_ATTRIBUTES"]) == 0
+    error_message = "an unset user_attributes must not emit PM_OIDC_USER_ATTRIBUTES."
+  }
+}
+
+run "user_attributes_reach_the_control_plane" {
+  command = plan
+  variables {
+    datasources = { app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } } }
+    oidc        = { issuer = "https://idp.example.com", client_id = "pm", group_map = "pm-admins=system:admin", user_attributes = "manager:User,teams:Set<String>" }
+  }
+  assert {
+    condition     = contains([for env in module.ecs.services["control-plane"].container_definitions["control-plane"].container_definition.environment : env.value if env.name == "PM_OIDC_USER_ATTRIBUTES"], "manager:User,teams:Set<String>")
+    error_message = "user_attributes must reach the control plane as PM_OIDC_USER_ATTRIBUTES."
+  }
+}
+
+run "unknown_user_attribute_type_is_rejected" {
+  command = plan
+  variables {
+    datasources = { app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } } }
+    oidc        = { issuer = "https://idp.example.com", client_id = "pm", group_map = "pm-admins=system:admin", user_attributes = "manager:Email" }
+  }
+  expect_failures = [var.oidc]
+}
+
+run "github_wires_app_and_ci_issuers" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    github          = { app_id = "12345" }
+    ci_oidc_issuers = { github = "https://token.actions.githubusercontent.com" }
+  }
+  assert {
+    condition = alltrue([
+      contains(local.control_plane_environment, { name = "PM_GITHUB_APP_ID", value = "12345" }),
+      contains(local.control_plane_environment, { name = "PM_CI_OIDC_ISSUERS", value = "github=https://token.actions.githubusercontent.com" }),
+      length([for e in local.control_plane_environment : e if e.name == "PM_GITHUB_IDENTITY"]) == 0,
+      length([for s in local.control_plane_secrets : s if s.name == "PM_GITHUB_APP_PRIVATE_KEY"]) == 1,
+      length(aws_secretsmanager_secret.github_app_key) == 1,
+    ])
+    error_message = "github must set the App ID, the key secret, and the CI issuers; an empty identity keeps the default."
+  }
+}
+
+run "github_off_adds_nothing" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+  }
+  assert {
+    condition = alltrue([
+      length([for e in local.control_plane_environment : e if startswith(e.name, "PM_GITHUB_") || e.name == "PM_CI_OIDC_ISSUERS"]) == 0,
+      length(aws_secretsmanager_secret.github_app_key) == 0,
+    ])
+    error_message = "Without github or ci_oidc_issuers the control plane gets no GitHub settings."
+  }
+}
+
+run "ci_oidc_issuer_must_be_https" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    ci_oidc_issuers = { github = "http://token.actions.githubusercontent.com" }
+  }
+  expect_failures = [var.ci_oidc_issuers]
+}
+
+run "disabled_github_and_slack_create_secrets_only" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    github                = { app_id = "12345", enabled = false }
+    slack                 = { enabled = false }
+    auditmon_slack_alerts = { enabled = false }
+  }
+  assert {
+    condition = alltrue([
+      length(aws_secretsmanager_secret.github_app_key) == 1,
+      length(aws_secretsmanager_secret.slack) == 1,
+      length(aws_secretsmanager_secret.alert_slack_webhook) == 1,
+      length([for e in local.control_plane_environment : e if startswith(e.name, "PM_GITHUB_") || startswith(e.name, "PM_NOTIFY_")]) == 0,
+      length([for s in local.control_plane_secrets : s if startswith(s.name, "PM_GITHUB_") || startswith(s.name, "PM_SLACK_")]) == 0,
+      length(local.control_plane_secret_arns) == 4,
+      !strcontains(local.auditmon_config_yaml, "alerts"),
+    ])
+    error_message = "enabled = false must create each secret and wire none of them."
+  }
+}
+
+run "disabled_datasource_keeps_its_secret_without_a_proxy" {
+  command = plan
+  variables {
+    datasources = {
+      app  = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+      next = { engine = "mysql", wire_port = 40002, credential_group = "app", enabled = false, target = { host = "app.cluster-x.us-east-1.rds.amazonaws.com", port = 3306, db = "app" } }
+    }
+    bootstrap_client_host_pattern = "10.0.%"
+    target_credential_groups = {
+      app = {
+        aws_account_id = "222222222222", aws_account_alias = "data", rds_kind = "cluster", rds_identifier = "app"
+        engine         = "mysql", database = "app", schemas = ["app"]
+      }
+    }
+  }
+  assert {
+    condition     = contains(keys(aws_secretsmanager_secret.target_credentials), "next")
+    error_message = "A disabled datasource must keep its credentials secret."
+  }
+  assert {
+    condition     = contains(keys(module.ecs.services), "proxy-app")
+    error_message = "An enabled datasource must keep its proxy."
+  }
+  assert {
+    condition     = !contains(keys(module.ecs.services), "proxy-next")
+    error_message = "A disabled datasource must get no proxy service."
+  }
+  assert {
+    condition     = [for k in keys(module.internal_nlb.target_groups) : k if startswith(k, "wire/")] == ["wire/app"]
+    error_message = "A disabled datasource must get no NLB wire target group."
+  }
+  assert {
+    condition     = keys(output.wire_endpoints) == ["app"]
+    error_message = "A disabled datasource must not appear in wire_endpoints."
+  }
+  assert {
+    condition     = contains(keys(module.target_credentials_key[0].grants), "bootstrap-write-next")
+    error_message = "The bootstrap must still be able to fill a disabled datasource's secret."
+  }
+  assert {
+    condition     = !contains(keys(module.target_credentials_key[0].grants), "proxy-read-next")
+    error_message = "A disabled datasource must get no proxy read grant."
+  }
+  assert {
+    condition     = length(local.bootstrap_config.groups["app"].serving) == 0
+    error_message = "The bootstrap must not restart a disabled datasource's proxy."
+  }
+  assert {
+    condition     = keys(local.bootstrap_config.groups["app"].datasources) == ["next"]
+    error_message = "The bootstrap must still fill a disabled datasource's secret."
+  }
+}
+
+run "omitted_enabled_keeps_slack_and_auditmon_wired" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack                 = {}
+    auditmon_slack_alerts = {}
+  }
+  assert {
+    condition = alltrue([
+      length([for s in local.control_plane_secrets : s if s.name == "PM_SLACK_BOT_TOKEN"]) == 1,
+      local.auditmon_slack_enabled,
+      strcontains(local.auditmon_config_yaml, "alerts"),
+    ])
+    error_message = "slack and auditmon_slack_alerts without enabled must stay wired."
+  }
 }

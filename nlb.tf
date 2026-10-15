@@ -30,13 +30,22 @@ module "internal_nlb" {
       }
     },
     {
-      for key, ds in var.datasources : "wire/${key}" => {
+      for key, ds in local.serving_datasources : "wire/${key}" => {
         from_port   = ds.wire_port
         to_port     = ds.wire_port
         ip_protocol = "tcp"
         cidr_ipv4   = var.vpc_cidr
       }
     },
+    # The control plane forwards the console's web paths here when it serves the console on the tailnet.
+    { for key, value in {
+      web = {
+        from_port   = local.web_port
+        to_port     = local.web_port
+        ip_protocol = "tcp"
+        cidr_ipv4   = var.vpc_cidr
+      }
+    } : key => value if local.tailnet_enabled },
   )
 
   security_group_egress_rules = {
@@ -64,7 +73,7 @@ module "internal_nlb" {
       }
     },
     {
-      for key, ds in var.datasources : "wire/${key}" => {
+      for key, ds in local.serving_datasources : "wire/${key}" => {
         port     = ds.wire_port
         protocol = "TCP"
         forward = {
@@ -72,6 +81,15 @@ module "internal_nlb" {
         }
       }
     },
+    { for key, value in {
+      web = {
+        port     = local.web_port
+        protocol = "TCP"
+        forward = {
+          target_group_key = "web"
+        }
+      }
+    } : key => value if local.tailnet_enabled },
   )
 
   target_groups = merge(
@@ -119,7 +137,7 @@ module "internal_nlb" {
       # module prefix and "-wire-" are spent: a key like dev-as-prod-mysql overruns it. The wire port is
       # unique per datasource and already the thing this group routes, so it names the group — a
       # datasource key can then be as descriptive as it needs without a rename becoming a plan failure.
-      for key, ds in var.datasources : "wire/${key}" => {
+      for key, ds in local.serving_datasources : "wire/${key}" => {
         name              = "${var.name}-wire-${ds.wire_port}"
         protocol          = "TCP"
         port              = ds.wire_port
@@ -137,5 +155,23 @@ module "internal_nlb" {
         }
       }
     },
+    { for key, value in {
+      web = {
+        name                 = "${var.name}-web-nlb"
+        protocol             = "TCP"
+        port                 = local.web_port
+        target_type          = "ip"
+        create_attachment    = false
+        deregistration_delay = 5
+        health_check = {
+          protocol            = "HTTP"
+          path                = "/"
+          matcher             = "200-399"
+          interval            = 10
+          healthy_threshold   = 2
+          unhealthy_threshold = 3
+        }
+      }
+    } : key => value if local.tailnet_enabled },
   )
 }

@@ -1,3 +1,13 @@
+# The console's own certificate, found as the ALB's is. It must have been requested with export enabled:
+# the control plane exports its key.
+data "aws_acm_certificate" "tailnet" {
+  count = local.tailnet_enabled ? 1 : 0
+
+  domain      = var.console_hostname
+  statuses    = ["ISSUED"]
+  most_recent = true
+}
+
 # Resolved from the subnet IDs the module already takes, rather than a second CIDR variable a
 # caller could let drift out of step with private_subnets.
 data "aws_subnet" "private" {
@@ -19,6 +29,23 @@ locals {
       }],
     ) if ds.engine == "athena"
   }
+
+  tailnet_enabled               = var.tailnet != null
+  web_port                      = 41300
+  control_plane_tasks_role_name = "${var.name}-control-plane-tasks"
+  control_plane_tasks_role_arn  = "arn:aws:iam::${local.aws_account_id}:role/${local.control_plane_tasks_role_name}"
+
+  # Read through the listener, so the web service registers only once the target group has a load balancer.
+  web_tailnet_load_balancer = !local.tailnet_enabled ? {} : {
+    nlb-http = {
+      target_group_arn = module.internal_nlb.listeners["web"].arn == null ? null : module.internal_nlb.target_groups["web"].arn
+      container_name   = "web"
+      container_port   = local.web_port
+    }
+  }
+
+  slack_enabled  = var.slack != null && try(var.slack.enabled, true)
+  github_enabled = var.github != null && try(var.github.enabled, true)
 
   control_plane_environment = concat(
     [
@@ -56,9 +83,28 @@ locals {
       # (this unset) filters `system:*`, so an admin signs in and resolves to zero roles.
       { name = "PM_OIDC_GROUP_MAP", value = var.oidc.group_map },
     ],
-    var.slack == null ? [] : [
+    try(var.oidc.user_attributes, "") == "" ? [] : [
+      { name = "PM_OIDC_USER_ATTRIBUTES", value = var.oidc.user_attributes },
+    ],
+    !local.slack_enabled ? [] : [
       { name = "PM_NOTIFY_STATEMENT", value = var.slack.statement },
       { name = "PM_NOTIFY_LOCALE", value = var.slack.locale },
+    ],
+    !local.github_enabled ? [] : concat(
+      [{ name = "PM_GITHUB_APP_ID", value = var.github.app_id }],
+      var.github.identity == "" ? [] : [{ name = "PM_GITHUB_IDENTITY", value = var.github.identity }],
+    ),
+    length(var.ci_oidc_issuers) == 0 ? [] : [
+      { name = "PM_CI_OIDC_ISSUERS", value = join(",", [for name, issuer in var.ci_oidc_issuers : "${name}=${issuer}"]) },
+    ],
+    !local.tailnet_enabled ? [] : [
+      { name = "AWS_REGION", value = local.aws_region },
+      { name = "PM_TAILNET_CLIENT_ID", value = var.tailnet.client_id },
+      { name = "PM_TAILNET_AUDIENCE", value = local.tailscale_audience },
+      { name = "PM_TAILNET_TAGS", value = var.tailnet.tag },
+      { name = "PM_TAILNET_SERVICE", value = var.tailnet.service_name },
+      { name = "PM_TAILNET_CERT_ARN", value = one(data.aws_acm_certificate.tailnet[*].arn) },
+      { name = "PM_WEB_URL", value = "http://${module.internal_nlb.dns_name}:${local.web_port}" },
     ],
   )
 
@@ -72,9 +118,12 @@ locals {
     var.oidc == null ? [] : [
       { name = "PM_OIDC_CLIENT_SECRET", valueFrom = aws_secretsmanager_secret.oidc_client_secret.arn },
     ],
-    var.slack == null ? [] : [
+    !local.slack_enabled ? [] : [
       { name = "PM_SLACK_BOT_TOKEN", valueFrom = "${one(values(aws_secretsmanager_secret.slack)[*].arn)}:bot_token::" },
       { name = "PM_SLACK_APP_TOKEN", valueFrom = "${one(values(aws_secretsmanager_secret.slack)[*].arn)}:app_token::" },
+    ],
+    !local.github_enabled ? [] : [
+      { name = "PM_GITHUB_APP_PRIVATE_KEY", valueFrom = one(values(aws_secretsmanager_secret.github_app_key)[*].arn) },
     ],
   )
 
@@ -86,10 +135,11 @@ locals {
       aws_secretsmanager_secret.db_master.arn,
     ],
     var.oidc == null ? [] : [aws_secretsmanager_secret.oidc_client_secret.arn],
-    var.slack == null ? [] : [one(values(aws_secretsmanager_secret.slack)[*].arn)],
+    !local.slack_enabled ? [] : [one(values(aws_secretsmanager_secret.slack)[*].arn)],
+    !local.github_enabled ? [] : [one(values(aws_secretsmanager_secret.github_app_key)[*].arn)],
   )
 
-  auditmon_slack_enabled = var.auditmon_slack_alerts != null
+  auditmon_slack_enabled = var.auditmon_slack_alerts != null && try(var.auditmon_slack_alerts.enabled, true)
 
   # auditmon runs env-only on a missing config file, so a split between config-init's write path and
   # the monitor's read path (AUDITMON_CONFIG) would silently drop the rules and sink instead of failing.
@@ -227,6 +277,38 @@ module "ecs" {
 
         task_exec_secret_arns = local.control_plane_secret_arns
 
+        # A fixed name, so the role's ARN, which the tailnet's federated identity trusts as its subject,
+        # survives a role replacement.
+        tasks_iam_role_name            = local.tailnet_enabled ? local.control_plane_tasks_role_name : null
+        tasks_iam_role_use_name_prefix = !local.tailnet_enabled
+        tasks_iam_role_statements = !local.tailnet_enabled ? null : [
+          {
+            actions   = ["sts:GetWebIdentityToken"]
+            resources = ["*"]
+            condition = [
+              {
+                test     = "ForAllValues:StringEquals"
+                variable = "sts:IdentityTokenAudience"
+                values   = [local.tailscale_audience]
+              },
+              {
+                test     = "Null"
+                variable = "sts:IdentityTokenAudience"
+                values   = ["false"]
+              },
+              {
+                test     = "NumericLessThanEquals"
+                variable = "sts:DurationSeconds"
+                values   = ["300"]
+              },
+            ]
+          },
+          {
+            actions   = ["acm:ExportCertificate"]
+            resources = [one(data.aws_acm_certificate.tailnet[*].arn)]
+          },
+        ]
+
         security_group_ingress_rules = merge(
           {
             alb-http = {
@@ -350,6 +432,14 @@ module "ecs" {
               referenced_security_group_id = try(module.edge_nlb[0].security_group_id, null)
             }
           } : key => value if local.edge_enabled },
+          { for key, value in {
+            nlb-http = {
+              from_port                    = local.web_port
+              to_port                      = local.web_port
+              ip_protocol                  = "tcp"
+              referenced_security_group_id = module.internal_nlb.security_group_id
+            }
+          } : key => value if local.tailnet_enabled },
         )
         security_group_egress_rules = {
           all = {
@@ -386,11 +476,12 @@ module "ecs" {
               container_port   = 41300
             }
           } : key => value if local.edge_enabled },
+          local.web_tailnet_load_balancer,
         )
       }
     },
     {
-      for key, ds in var.datasources : "proxy-${key}" => {
+      for key, ds in local.serving_datasources : "proxy-${key}" => {
         cpu    = 512
         memory = 1024
 

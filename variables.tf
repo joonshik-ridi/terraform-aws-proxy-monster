@@ -142,6 +142,7 @@ variable "datasources" {
       denied_glue_resources = optional(list(string), [])
       lake_formation        = optional(bool, false)
     }))
+    enabled = optional(bool, true)
   }))
   description = <<-EOT
     Wire proxies, one ECS service + NLB listener per datasource; key = PM_DATASOURCE_NAME.
@@ -152,7 +153,10 @@ variable "datasources" {
     athena.denied_glue_resources lists Glue resources ("database/<db>" or "table/<db>/<table>", "*"
     and "?" allowed, lower case as Glue stores them) the task role is explicitly denied, so Athena
     cannot plan a query on a sensitive table inside a readable data prefix. The deny covers the Glue
-    name only: the table's S3 objects stay readable under data_prefixes. athena.lake_formation grants
+    name only: the table's S3 objects stay readable under data_prefixes, and a table deny does not
+    drop the table from ListTableMetadata. The proxy reads every database's tables at boot and fails
+    its catalog on the first error, so denying a database Athena still lists stops every query.
+    athena.lake_formation grants
     lakeformation:GetDataAccess, needed once a table location is registered with Lake Formation;
     Lake Formation then decides what the vended credentials read, including locations outside
     data_prefixes.
@@ -163,6 +167,8 @@ variable "datasources" {
     "system", "rds", or a PEM file path inside the container; with verify-full, unset means
     system,rds. verify-ca checks only the chain, so it needs a PEM path to a CA that signs nothing
     but this target, never system or rds.
+    enabled = false creates the datasource's credentials secret (and lets the bootstrap fill it) without
+    its proxy service or NLB listener, so the secret, and wire-tls, can be filled before it serves.
   EOT
 
   validation {
@@ -306,9 +312,10 @@ variable "name" {
 
 variable "oidc" {
   type = object({
-    issuer    = string
-    client_id = string
-    group_map = string
+    issuer          = string
+    client_id       = string
+    group_map       = string
+    user_attributes = optional(string, "")
   })
   description = <<-EOT
     OIDC SSO client for the console (the client secret is filled manually into the
@@ -321,6 +328,10 @@ variable "oidc" {
     roles, and is denied every query, with nothing in the UI explaining why. An explicit map
     is the only way an IdP group grants a system role.
     e.g. "proxy-monster-admin=system:admin,proxy-monster-developers=developers"
+
+    user_attributes copies id_token claims onto the Cedar User as "name:Type" pairs, Type one
+    of String, Long, Bool, Set<String>, User. e.g. "manager:User" lets one policy route each
+    approval to the requester's manager (resource.requester.manager == principal).
   EOT
   default     = null
 
@@ -330,6 +341,11 @@ variable "oidc" {
   validation {
     condition     = var.oidc == null || can(regex("^[^=,[:space:]]+=[^=,[:space:]]+(,[^=,[:space:]]+=[^=,[:space:]]+)*$", var.oidc.group_map))
     error_message = "oidc.group_map must be a non-empty comma-separated list of idp-group=role pairs, e.g. \"proxy-monster-admin=system:admin\". Empty parses as passthrough, which filters system:* roles and leaves SSO users with none."
+  }
+
+  validation {
+    condition     = var.oidc == null || can(regex("^$|^[A-Za-z_][A-Za-z0-9_]*:(String|Long|Bool|Set<String>|User)(,[A-Za-z_][A-Za-z0-9_]*:(String|Long|Bool|Set<String>|User))*$", var.oidc.user_attributes))
+    error_message = "oidc.user_attributes must be comma-separated name:Type pairs, Type one of String, Long, Bool, Set<String>, User, e.g. \"manager:User,department:String\"."
   }
 }
 
@@ -789,6 +805,51 @@ variable "tailscale" {
   }
 }
 
+variable "tailnet" {
+  type = object({
+    client_id    = string
+    tag          = string
+    service_name = string
+  })
+  description = <<-EOT
+    Puts the console on the tailnet through the control plane itself, or null for none. The control
+    plane joins as an ephemeral node named pmon-<instance name> and hosts service_name on ports 443
+    and 80, so this replaces the tailscale host and its edge. Each tailnet client's own address is
+    recorded as requester_ip. It is independent of var.tailscale: both may host the same Service
+    while clients move over.
+
+    The node logs in keyless through a Tailscale federated identity (AWS outbound web identity
+    federation): its issuer is the account's STS token URL, its subject the
+    control_plane_task_role_arn output, and its scopes allow auth_keys with tag. client_id is that
+    identity's id; append ?ephemeral=true&preauthorized=true if the tailnet requires device
+    approval. The tailnet must define service_name and let tag own and auto-approve it.
+
+    TLS uses the ISSUED ACM certificate whose primary domain is console_hostname, in the module's
+    region, looked up as the ALB's is. It must have been requested with export enabled: the control
+    plane exports it at start and daily, and a certificate that cannot be exported stops it from
+    starting. Setting console_cert_domain to console_hostname serves the same certificate on the
+    ALB. Point the console_hostname DNS record at the Service VIP. The web console is reached
+    through the internal NLB, so the whole console is served on the tailnet.
+  EOT
+  default     = null
+
+  validation {
+    condition     = var.tailnet == null ? true : trimspace(var.tailnet.client_id) != ""
+    error_message = "tailnet.client_id must not be empty."
+  }
+
+  validation {
+    condition     = var.tailnet == null ? true : startswith(var.tailnet.tag, "tag:")
+    error_message = "tailnet.tag must start with tag:."
+  }
+
+  validation {
+    condition     = var.tailnet == null ? true : can(regex("^svc:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.tailnet.service_name))
+    error_message = "tailnet.service_name must be svc: followed by a lowercase DNS label."
+  }
+
+}
+
 variable "target_credentials_key_admin_role_arns" {
   type        = list(string)
   description = <<-EOT
@@ -831,6 +892,7 @@ variable "auditmon_task_size" {
 variable "auditmon_slack_alerts" {
   type = object({
     min_severity = optional(string, "warn")
+    enabled      = optional(bool, true)
   })
   default     = null
   description = <<-EOT
@@ -840,6 +902,7 @@ variable "auditmon_slack_alerts" {
 
     The webhook URL is filled by hand into the <name>/alert-slack-webhook secret; a sink with
     an empty URL makes auditmon fail closed at boot, so fill the secret before setting this.
+    enabled = false creates the secret and leaves auditmon as if this were null.
 
     min_severity is the Slack floor: "warn" forwards every rule; "critical" forwards only
     mass-export volume breaches and chain-integrity breaks.
@@ -855,6 +918,7 @@ variable "slack" {
   type = object({
     statement = optional(string, "auto")
     locale    = optional(string, "en")
+    enabled   = optional(bool, true)
   })
   default     = null
   description = <<-EOT
@@ -864,7 +928,8 @@ variable "slack" {
 
     Both tokens are filled by hand into the <name>/slack secret as a JSON object
     {"bot_token":"xoxb-…","app_token":"xapp-…"}; the control plane runs the layer inert until both
-    are present, so fill the secret before rolling the control plane onto this.
+    are present, so fill the secret before rolling the control plane onto this. enabled = false
+    creates the secret without wiring it, so it can be filled before a second apply turns it on.
 
     statement controls how much of a query's SQL an approval message shows — "omit" (metadata only),
     "auto" (the default; shown only when a disclosure hint clears it, hidden when the query's own text
@@ -881,5 +946,39 @@ variable "slack" {
   validation {
     condition     = var.slack == null ? true : contains(["en", "ko"], var.slack.locale)
     error_message = "slack.locale must be en or ko."
+  }
+}
+
+variable "github" {
+  type = object({
+    app_id   = string
+    identity = optional(string, "")
+    enabled  = optional(bool, true)
+  })
+  default     = null
+  description = <<-EOT
+    The control plane's GitHub App, which runs reviewed SQL files from pull requests. A non-null
+    value creates a <name>/github-app-key secret; null turns the GitHub source off. Default null.
+
+    Fill the App's private key (the PEM text) by hand into <name>/github-app-key before rolling the
+    control plane onto this; the task fails to start until it is filled. identity is
+    PM_GITHUB_IDENTITY, the ordered resolvers that map a GitHub user to a proxy-monster user; empty
+    keeps the control plane's default. enabled = false creates the secret without wiring it, so it
+    can be filled before a second apply turns the App on.
+  EOT
+}
+
+variable "ci_oidc_issuers" {
+  type        = map(string)
+  default     = {}
+  description = <<-EOT
+    CI systems whose OIDC tokens the control plane exchanges for its own, as name => issuer URL,
+    e.g. { github = "https://token.actions.githubusercontent.com" }. A token's audience must be
+    https://<console_hostname>. Empty disables the exchange.
+  EOT
+
+  validation {
+    condition     = alltrue([for name, issuer in var.ci_oidc_issuers : can(regex("^[a-z0-9][a-z0-9-]*$", name)) && startswith(issuer, "https://")])
+    error_message = "ci_oidc_issuers names must match [a-z0-9][a-z0-9-]* and issuers must be https URLs."
   }
 }

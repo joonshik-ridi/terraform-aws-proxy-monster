@@ -21,7 +21,7 @@ admits callers outside the VPC CIDR.
 |---|---|
 | `ecs.tf` | ECS cluster; services `control-plane`, `web`, `auditmon`, `proxy-<ds>` per entry of `datasources`, and `<name>-tailscale` when `tailscale` is set |
 | `alb.tf` | Console ALB, HTTPS listener on an existing ACM cert, HTTP→HTTPS redirect |
-| `nlb.tf` | Internal NLB: control-plane HTTP/gRPC and one listener per datasource wire port |
+| `nlb.tf` | Internal NLB: control-plane HTTP/gRPC, one listener per datasource wire port, and web when `tailnet` is set |
 | `edge.tf` + `edge/` | With `tailscale.edge`: a second internal NLB that admits only the Tailscale host, the Caddyfile for its sidecar, and the restart schedule |
 | `aurora.tf` | Aurora Serverless v2 PostgreSQL for the control-plane store |
 | `s3.tf` | Audit export bucket with Object Lock (`audit_lock_mode`, `audit_retention_days`) |
@@ -41,7 +41,8 @@ admits callers outside the VPC CIDR.
   pointing `console_hostname` at the `console_alb_dns_name` output is the caller's.
 - Images: `images` — one URI per component. Public images are on
   `public.ecr.aws/w1t1s2q1/pm-*`.
-- Identity: `oidc` (issuer, client id, `group_map`). `null` runs the console
+- Identity: `oidc` (issuer, client id, `group_map`, optional `user_attributes`
+  for id_token claims policies read, e.g. `manager:User`). `null` runs the console
   auth-disabled; use only for a first boot.
 - Targets: `datasources` and, for credentials the module provisions,
   `target_credential_groups`. An `athena` datasource has no target DB or
@@ -49,7 +50,10 @@ admits callers outside the VPC CIDR.
   scoped to one workgroup, catalog, and set of S3 prefixes.
   `athena.denied_glue_resources` denies sensitive Glue databases and tables, so
   Athena cannot plan a query on them; their S3 objects stay readable under
-  `data_prefixes`. `athena.lake_formation` adds the
+  `data_prefixes`, and a table deny does not hide the table from
+  `ListTableMetadata`. The proxy reads every database's tables at boot and
+  fails its catalog on the first error, so a database deny stops every query.
+  `athena.lake_formation` adds the
   `lakeformation:GetDataAccess` that Lake Formation-registered locations need,
   and Lake Formation then decides what those locations expose, even outside
   `data_prefixes`.
@@ -89,6 +93,24 @@ admits callers outside the VPC CIDR.
     `openssl_image` container decrypts the key, so the key lives only on the
     task's volume.
     `redeploy_schedule` restarts the task to pick up a renewed certificate.
+- Tailnet from the control plane (optional): `tailnet` has the control plane
+  join the tailnet itself, with no Tailscale task, sidecar or edge NLB.
+
+  ```
+  client ─▶ Service VIP ─▶ control-plane :443 ─▶ control plane, or internal NLB ─▶ web :41300
+  ```
+
+  - The control plane joins as `pmon-<instance name>` and hosts
+    `tailnet.service_name` on 443 and 80. The tailnet client's address is the
+    `requester_ip`.
+  - TLS uses the ISSUED certificate whose primary domain is `console_hostname`,
+    looked up as the ALB's is. It must have been requested with export enabled:
+    the control plane exports it at start and daily. Set `console_cert_domain`
+    to `console_hostname` to serve the same certificate on the ALB.
+  - It logs in through its own federated identity, set up like the one above but
+    with the `control_plane_task_role_arn` output as its subject; its id is
+    `tailnet.client_id`. It can host the same Service as `tailscale` while
+    clients move over.
 
 ## Secrets
 
@@ -99,7 +121,13 @@ admits callers outside the VPC CIDR.
 | `wire-tls` | Operator, using the `wire_tls_issuance` output after the first apply |
 | `target-credentials/<ds>` (MySQL, PostgreSQL) | Bootstrap Lambda when the datasource has a `credential_group`; operator otherwise |
 | `master-credentials/<id>` | Operator, for external (non-RDS) credential groups |
-| `slack`, `alert-slack-webhook` | Operator, optional |
+| `slack`, `alert-slack-webhook`, `github-app-key` | Operator, optional |
+
+A task that reads a hand-filled secret does not start until it is filled. To fill
+one before anything reads it, apply with `enabled = false` on its input
+(`github`, `slack`, `auditmon_slack_alerts`, or a `datasources` entry), fill the
+secret, then apply again without it. A datasource left disabled also gets no
+proxy, so the first apply can create the NLB that `wire-tls` names.
 
 ## Target credential bootstrap
 
