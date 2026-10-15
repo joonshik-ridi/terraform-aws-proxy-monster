@@ -776,10 +776,22 @@ run "tailnet_null_adds_nothing" {
     condition = alltrue([
       length([for e in local.control_plane_environment : e if startswith(e.name, "PM_TAILNET_") || e.name == "PM_WEB_URL"]) == 0,
       !contains(keys(module.internal_nlb.listeners), "web"),
-      output.control_plane_task_role_arn == null,
       length(data.aws_acm_certificate.tailnet) == 0,
     ])
     error_message = "A null tailnet must leave the control plane, the internal NLB and the outputs as they were."
+  }
+}
+
+run "control_plane_task_role_has_a_fixed_name" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+  }
+  assert {
+    condition     = module.ecs.services["control-plane"].tasks_iam_role_name == "proxy-monster-control-plane-tasks" && output.control_plane_task_role_arn == "arn:aws:iam::111111111111:role/proxy-monster-control-plane-tasks"
+    error_message = "The control-plane task role must keep its fixed name with no tailnet."
   }
 }
 
@@ -1031,5 +1043,128 @@ run "omitted_enabled_keeps_slack_and_auditmon_wired" {
       strcontains(local.auditmon_config_yaml, "alerts"),
     ])
     error_message = "slack and auditmon_slack_alerts without enabled must stay wired."
+  }
+}
+
+run "github_kms_key_signs_without_a_secret" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    github = { app_id = "12345", kms_key_arn = "arn:aws:kms:us-east-1:111111111111:key/00000000-0000-0000-0000-000000000000" }
+  }
+  assert {
+    condition = alltrue([
+      length(aws_secretsmanager_secret.github_app_key) == 0,
+      contains(local.control_plane_environment, { name = "PM_GITHUB_APP_KMS_KEY_ID", value = "arn:aws:kms:us-east-1:111111111111:key/00000000-0000-0000-0000-000000000000" }),
+      length([for s in local.control_plane_secrets : s if s.name == "PM_GITHUB_APP_PRIVATE_KEY"]) == 0,
+      local.github_kms_statements[0].actions == ["kms:Sign"],
+    ])
+    error_message = "github.kms_key_arn must sign through KMS with no key secret."
+  }
+}
+
+run "github_without_a_kms_key_keeps_its_key_secret" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    github = { app_id = "12345" }
+  }
+  assert {
+    condition = alltrue([
+      length(aws_secretsmanager_secret.github_app_key) == 1,
+      length(local.github_kms_statements) == 0,
+    ])
+    error_message = "Without kms_key_arn the key secret stays and the task role gets no kms:Sign."
+  }
+}
+
+run "slack_channels_render_in_order_with_mode" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack = {
+      channels = [
+        { tag = "system:production", channel = "C0789GHI" },
+        { tag = "service:app", channel = "C0123ABC" },
+      ]
+      mode = "channel"
+    }
+  }
+  assert {
+    condition = alltrue([
+      contains(local.control_plane_environment, { name = "PM_SLACK_CHANNELS", value = "system:production=C0789GHI,service:app=C0123ABC" }),
+      contains(local.control_plane_environment, { name = "PM_SLACK_MODE", value = "channel" }),
+    ])
+    error_message = "slack.channels must render as tag=channel in order, with PM_SLACK_MODE when set."
+  }
+}
+
+run "slack_without_channels_sends_dms_only" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack = {}
+  }
+  assert {
+    condition     = length([for e in local.control_plane_environment : e if contains(["PM_SLACK_CHANNELS", "PM_SLACK_MODE"], e.name)]) == 0
+    error_message = "Without channels or mode the control plane gets neither variable."
+  }
+}
+
+run "slack_channel_must_be_a_channel_id" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack = { channels = [{ tag = "service:app", channel = "#app-approvals" }] }
+  }
+  expect_failures = [var.slack]
+}
+
+run "slack_channel_tag_listed_twice_is_rejected" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack = { channels = [{ tag = "service:app", channel = "C0123ABC" }, { tag = "service:app ", channel = "C0456DEF" }] }
+  }
+  expect_failures = [var.slack]
+}
+
+run "slack_unknown_mode_is_rejected" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack = { mode = "dm" }
+  }
+  expect_failures = [var.slack]
+}
+
+run "slack_mode_without_channels_sets_only_the_mode" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, target = { host = "db.example.com", port = 3306, db = "app" } }
+    }
+    slack = { mode = "channel" }
+  }
+  assert {
+    condition = alltrue([
+      contains(local.control_plane_environment, { name = "PM_SLACK_MODE", value = "channel" }),
+      length([for e in local.control_plane_environment : e if e.name == "PM_SLACK_CHANNELS"]) == 0,
+    ])
+    error_message = "slack.mode alone must set PM_SLACK_MODE and no PM_SLACK_CHANNELS."
   }
 }

@@ -46,6 +46,18 @@ locals {
 
   slack_enabled  = var.slack != null && try(var.slack.enabled, true)
   github_enabled = var.github != null && try(var.github.enabled, true)
+  github_kms_key = try(var.github.kms_key_arn, null)
+  github_kms_statements = [for s in [
+    {
+      actions   = ["kms:Sign"]
+      resources = [local.github_kms_key]
+      condition = [{
+        test     = "StringEquals"
+        variable = "kms:SigningAlgorithm"
+        values   = ["RSASSA_PKCS1_V1_5_SHA_256"]
+      }]
+    },
+  ] : s if local.github_kms_key != null && local.github_enabled]
 
   control_plane_environment = concat(
     [
@@ -86,13 +98,20 @@ locals {
     try(var.oidc.user_attributes, "") == "" ? [] : [
       { name = "PM_OIDC_USER_ATTRIBUTES", value = var.oidc.user_attributes },
     ],
-    !local.slack_enabled ? [] : [
-      { name = "PM_NOTIFY_STATEMENT", value = var.slack.statement },
-      { name = "PM_NOTIFY_LOCALE", value = var.slack.locale },
-    ],
+    !local.slack_enabled ? [] : concat(
+      [
+        { name = "PM_NOTIFY_STATEMENT", value = var.slack.statement },
+        { name = "PM_NOTIFY_LOCALE", value = var.slack.locale },
+      ],
+      length(var.slack.channels) == 0 ? [] : [
+        { name = "PM_SLACK_CHANNELS", value = join(",", [for r in var.slack.channels : "${r.tag}=${r.channel}"]) },
+      ],
+      var.slack.mode == null ? [] : [{ name = "PM_SLACK_MODE", value = var.slack.mode }],
+    ),
     !local.github_enabled ? [] : concat(
       [{ name = "PM_GITHUB_APP_ID", value = var.github.app_id }],
       var.github.identity == "" ? [] : [{ name = "PM_GITHUB_IDENTITY", value = var.github.identity }],
+      local.github_kms_key == null ? [] : [{ name = "PM_GITHUB_APP_KMS_KEY_ID", value = local.github_kms_key }],
     ),
     length(var.ci_oidc_issuers) == 0 ? [] : [
       { name = "PM_CI_OIDC_ISSUERS", value = join(",", [for name, issuer in var.ci_oidc_issuers : "${name}=${issuer}"]) },
@@ -122,7 +141,7 @@ locals {
       { name = "PM_SLACK_BOT_TOKEN", valueFrom = "${one(values(aws_secretsmanager_secret.slack)[*].arn)}:bot_token::" },
       { name = "PM_SLACK_APP_TOKEN", valueFrom = "${one(values(aws_secretsmanager_secret.slack)[*].arn)}:app_token::" },
     ],
-    !local.github_enabled ? [] : [
+    !local.github_enabled || local.github_kms_key != null ? [] : [
       { name = "PM_GITHUB_APP_PRIVATE_KEY", valueFrom = one(values(aws_secretsmanager_secret.github_app_key)[*].arn) },
     ],
   )
@@ -136,7 +155,7 @@ locals {
     ],
     var.oidc == null ? [] : [aws_secretsmanager_secret.oidc_client_secret.arn],
     !local.slack_enabled ? [] : [one(values(aws_secretsmanager_secret.slack)[*].arn)],
-    !local.github_enabled ? [] : [one(values(aws_secretsmanager_secret.github_app_key)[*].arn)],
+    !local.github_enabled || local.github_kms_key != null ? [] : [one(values(aws_secretsmanager_secret.github_app_key)[*].arn)],
   )
 
   auditmon_slack_enabled = var.auditmon_slack_alerts != null && try(var.auditmon_slack_alerts.enabled, true)
@@ -277,11 +296,11 @@ module "ecs" {
 
         task_exec_secret_arns = local.control_plane_secret_arns
 
-        # A fixed name, so the role's ARN, which the tailnet's federated identity trusts as its subject,
-        # survives a role replacement.
-        tasks_iam_role_name            = local.tailnet_enabled ? local.control_plane_tasks_role_name : null
-        tasks_iam_role_use_name_prefix = !local.tailnet_enabled
-        tasks_iam_role_statements = !local.tailnet_enabled ? null : [
+        # A fixed name, so policies outside this module that name the role's ARN survive a role replacement.
+        tasks_iam_role_name            = local.control_plane_tasks_role_name
+        tasks_iam_role_use_name_prefix = false
+        # null, not []: the ECS module creates a task policy for any non-null list.
+        tasks_iam_role_statements = !local.tailnet_enabled && length(local.github_kms_statements) == 0 ? null : concat([for s in [
           {
             actions   = ["sts:GetWebIdentityToken"]
             resources = ["*"]
@@ -307,7 +326,7 @@ module "ecs" {
             actions   = ["acm:ExportCertificate"]
             resources = [one(data.aws_acm_certificate.tailnet[*].arn)]
           },
-        ]
+        ] : s if local.tailnet_enabled], local.github_kms_statements)
 
         security_group_ingress_rules = merge(
           {
