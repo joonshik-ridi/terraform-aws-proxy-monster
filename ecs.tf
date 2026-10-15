@@ -16,6 +16,20 @@ data "aws_subnet" "private" {
 }
 
 locals {
+  athena_glue_guard_statements = {
+    for key, ds in var.datasources : key => concat(
+      !ds.athena.lake_formation ? [] : [{
+        actions   = ["lakeformation:GetDataAccess"]
+        resources = ["*"]
+      }],
+      length(ds.athena.denied_glue_resources) == 0 ? [] : [{
+        effect    = "Deny"
+        actions   = ["glue:*"]
+        resources = [for resource in ds.athena.denied_glue_resources : "arn:aws:glue:${local.aws_region}:${local.aws_account_id}:${resource}"]
+      }],
+    ) if ds.engine == "athena"
+  }
+
   tailnet_enabled               = var.tailnet != null
   web_port                      = 41300
   control_plane_tasks_role_name = "${var.name}-control-plane-tasks"
@@ -624,7 +638,15 @@ module "ecs" {
             resources = ["*"]
           },
           {
-            actions = ["glue:GetDatabase", "glue:GetDatabases", "glue:GetTable", "glue:GetTables", "glue:GetPartition", "glue:GetPartitions"]
+            actions = [
+              "glue:BatchGetPartition",
+              "glue:GetDatabase",
+              "glue:GetDatabases",
+              "glue:GetPartition",
+              "glue:GetPartitions",
+              "glue:GetTable",
+              "glue:GetTables",
+            ]
             resources = [
               "arn:aws:glue:${local.aws_region}:${local.aws_account_id}:catalog",
               "arn:aws:glue:${local.aws_region}:${local.aws_account_id}:database/*",
@@ -659,7 +681,9 @@ module "ecs" {
               actions   = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"]
               resources = ["arn:aws:s3:::${ds.athena.result_prefix}*"]
             },
-        ])
+          ],
+          local.athena_glue_guard_statements[key],
+        )
 
         # Deterministic name so policies can carry it as a literal ARN; a reference would cycle.
         task_exec_iam_role_use_name_prefix = false

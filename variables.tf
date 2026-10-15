@@ -135,10 +135,12 @@ variable "datasources" {
       catalog   = optional(string, "AwsDataCatalog")
       # S3 prefixes ("bucket/key/", or "bucket/" for a whole bucket) the proxy's task role may use: the
       # workgroup's query-result location read-write, and every table location the datasource serves
-      # read-only. Athena reads table data as the caller, so these bound what the datasource can see
-      # regardless of policy.
-      result_prefix = string
-      data_prefixes = list(string)
+      # read-only. Athena reads table data as the caller, so these bound what the datasource can see,
+      # except locations registered with Lake Formation once lake_formation is on.
+      result_prefix         = string
+      data_prefixes         = list(string)
+      denied_glue_resources = optional(list(string), [])
+      lake_formation        = optional(bool, false)
     }))
     enabled = optional(bool, true)
   }))
@@ -148,6 +150,16 @@ variable "datasources" {
     target_credential_groups entry and the bootstrap function then fills and seals that secret, left
     null it stays a hand-filled shell. An athena datasource has no target and no secret: the proxy's
     task role calls Athena in this account on the athena block's workgroup, catalog and database.
+    athena.denied_glue_resources lists Glue resources ("database/<db>" or "table/<db>/<table>", "*"
+    and "?" allowed, lower case as Glue stores them) the task role is explicitly denied, so Athena
+    cannot plan a query on a sensitive table inside a readable data prefix. The deny covers the Glue
+    name only: the table's S3 objects stay readable under data_prefixes, and a table deny does not
+    drop the table from ListTableMetadata. The proxy reads every database's tables at boot and fails
+    its catalog on the first error, so denying a database Athena still lists stops every query.
+    athena.lake_formation grants
+    lakeformation:GetDataAccess, needed once a table location is registered with Lake Formation;
+    Lake Formation then decides what the vended credentials read, including locations outside
+    data_prefixes.
     description is one line, at most 500 characters, shown to MCP agents.
     target.tls is the proxy's TLS toward the target DB (PM_TARGET_TLS): disable, require, verify-ca
     or verify-full. verify-full checks the certificate against target.host, so that must be the
@@ -197,6 +209,16 @@ variable "datasources" {
       if ds.athena != null
     ])
     error_message = "athena.workgroup must be an Athena workgroup name, and athena.catalog must be AwsDataCatalog: the task role reaches only this account's Glue catalog."
+  }
+
+  validation {
+    condition = alltrue([
+      for ds in var.datasources : alltrue([
+        for resource in ds.athena.denied_glue_resources : can(regex("^(database/[a-z0-9_*?-]+|table/[a-z0-9_*?-]+/[a-z0-9_*?-]+)$", resource))
+      ])
+      if ds.athena != null
+    ])
+    error_message = "athena.denied_glue_resources entries must be \"database/<db>\" or \"table/<db>/<table>\" in lower case, using only a-z, 0-9, _, - and the * and ? wildcards."
   }
 
   validation {
