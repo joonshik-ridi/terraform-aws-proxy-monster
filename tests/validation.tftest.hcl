@@ -20,6 +20,9 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = { account_id = "111111111111" }
   }
+  mock_data "aws_network_interface" {
+    defaults = { private_ip = "10.0.0.10" }
+  }
 }
 mock_provider "archive" {}
 mock_provider "external" {
@@ -664,9 +667,14 @@ run "tailscale_edge_forwards_with_proxy_protocol_to_caddy" {
 
 run "tailscale_edge_wire_forwards_each_wire_port_with_proxy_protocol" {
   command = plan
+  override_data {
+    target = data.aws_network_interface.edge_nlb
+    values = { private_ip = "10.0.0.10" }
+  }
   override_module {
     target = module.edge_nlb
     outputs = {
+      arn_suffix        = "net/proxy-monster-tailscale/0123456789abcdef"
       dns_name          = "internal-edge.example.com"
       security_group_id = "sg-0fedcba9876543210"
       listeners = {
@@ -717,10 +725,10 @@ run "tailscale_edge_wire_forwards_each_wire_port_with_proxy_protocol" {
   assert {
     condition = alltrue([
       contains(module.ecs.services["proxy-app"].container_definitions["proxy"].container_definition.environment, { name = "PM_PROXY_PROTOCOL_PORT", value = "16033" }),
-      contains(module.ecs.services["proxy-app"].container_definitions["proxy"].container_definition.environment, { name = "PM_TRUSTED_PROXIES", value = local.private_subnet_cidrs }),
+      contains(module.ecs.services["proxy-app"].container_definitions["proxy"].container_definition.environment, { name = "PM_TRUSTED_PROXIES", value = "10.0.0.10" }),
       contains(module.ecs.services["proxy-app"].container_definitions["proxy"].container_definition.environment, { name = "PM_PROXY_PORT", value = "40001" }),
     ])
-    error_message = "With edge.wire, the proxy must open PROXY protocol port 16033 beside its wire port and trust the private subnets there."
+    error_message = "With edge.wire, the proxy must open PROXY protocol port 16033 beside its wire port and trust only the edge NLB's addresses there."
   }
   assert {
     condition     = local.edge_target_group_arns_after_listeners["wire/app"] == "arn:aws:elasticloadbalancing:us-east-1:111111111111:targetgroup/edge-40001/0123456789abcdef"

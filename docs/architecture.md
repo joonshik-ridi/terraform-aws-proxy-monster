@@ -101,9 +101,11 @@ admits callers outside the VPC CIDR.
   ```
 
   - The proxy opens `PM_PROXY_PROTOCOL_PORT` 16033 beside its wire port and
-    takes the client address from the PROXY header there. It trusts the private
-    subnets, and its security group admits 16033 only from the edge NLB, which
-    admits only the node.
+    takes the client address from the PROXY header there. `PM_TRUSTED_PROXIES`
+    is the edge NLB's own private addresses, one per subnet, so a task that an
+    extra security group lets reach 16033 still cannot forge a header. The
+    module's own rule admits 16033 only from the edge NLB, which admits only the
+    node.
   - The edge target groups health-check the plain wire port: a trusted peer
     that sends no header holds a connection slot until the header times out.
   - `PM_ADVERTISE_ADDR` still names the internal NLB, so pmon takes this path

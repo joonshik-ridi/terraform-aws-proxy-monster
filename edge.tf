@@ -10,6 +10,7 @@ locals {
   wire_proxy_protocol_port = 16033
   edge_wire_ports          = { for key, ds in local.serving_datasources : "wire/${key}" => ds.wire_port if local.edge_wire_enabled }
   edge_listener_ports      = merge(local.edge_upstream_ports, local.edge_wire_ports)
+  edge_nlb_addresses       = join(",", sort(data.aws_network_interface.edge_nlb[*].private_ip))
 
   edge_upstream_ports = {
     cp-http = 8080
@@ -107,6 +108,20 @@ module "edge_nlb" {
       }
     }
   })
+}
+
+data "aws_network_interface" "edge_nlb" {
+  count = local.edge_wire_enabled ? length(local.lb_subnets) : 0
+
+  filter {
+    name   = "description"
+    values = ["ELB ${module.edge_nlb[0].arn_suffix}"]
+  }
+
+  filter {
+    name   = "subnet-id"
+    values = [local.lb_subnets[count.index]]
+  }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "edge_nlb_from_tailscale" {

@@ -606,7 +606,7 @@ module "ecs" {
               ds.description == "" ? [] : [{ name = "PM_DATASOURCE_DESCRIPTION", value = ds.description }],
               local.edge_wire_enabled ? [
                 { name = "PM_PROXY_PROTOCOL_PORT", value = tostring(local.wire_proxy_protocol_port) },
-                { name = "PM_TRUSTED_PROXIES", value = local.private_subnet_cidrs },
+                { name = "PM_TRUSTED_PROXIES", value = local.edge_nlb_addresses },
               ] : [],
             )
 

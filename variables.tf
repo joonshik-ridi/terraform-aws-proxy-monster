@@ -775,8 +775,9 @@ variable "tailscale" {
 
     edge.wire, when true, also advertises every enabled datasource's wire_port on the Service.
     The host forwards each with PROXY protocol v2 through the edge NLB to a second proxy port,
-    16033, which the proxy opens with PM_PROXY_PROTOCOL_PORT and trusts only from the private
-    subnets; only the edge NLB may reach it. Each proxy then records the tailnet client's own
+    16033, which the proxy opens with PM_PROXY_PROTOCOL_PORT and trusts only from the edge NLB's
+    own addresses, so another task cannot forge a header even through an extra security group
+    that admits it. Each proxy then records the tailnet client's own
     address as client_addr. The proxy image must be proxy-monster server 0.1.33 or later, and
     the Service must expose every wire_port. PM_ADVERTISE_ADDR still names the internal NLB, so
     pmon reaches the Service only where that name resolves to the Service VIP.
