@@ -413,8 +413,8 @@ module "ecs" {
       }
 
       web = {
-        cpu    = 512
-        memory = 1024
+        cpu    = var.web_task_size.cpu
+        memory = var.web_task_size.memory
 
         container_definitions = {
           web = {
@@ -506,8 +506,8 @@ module "ecs" {
     },
     {
       for key, ds in local.serving_datasources : "proxy-${key}" => {
-        cpu    = 512
-        memory = 1024
+        cpu    = var.proxy_task_size.cpu
+        memory = var.proxy_task_size.memory
 
         volume = {
           wire-tls = {}
@@ -882,8 +882,8 @@ module "ecs" {
     },
     var.tailscale == null ? {} : {
       (local.tailscale_service) = {
-        cpu    = local.edge_enabled ? 512 : 256
-        memory = local.edge_enabled ? 1024 : 512
+        cpu    = local.edge_task_size.cpu
+        memory = local.edge_task_size.memory
 
         volume = merge({ tailscale-config = {} }, { for key, value in { edge-certs = {} } : key => value if local.edge_enabled })
 
