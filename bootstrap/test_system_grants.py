@@ -211,6 +211,10 @@ class SystemGrantsTest(unittest.TestCase):
         bootstrap._validate(group, bootstrap.Secret("test-password"))
         statements = self.provision_statements(group, tables=[table])
         self.assertIn(
+            r"GRANT SELECT ON `performance\_schema`.* TO 'pmproxy_rw'@'10.25.%'",
+            statements,
+        )
+        self.assertIn(
             "GRANT DROP ON `performance_schema`.`events_statements_summary_by_digest`"
             " TO 'pmproxy_rw'@'10.25.%'",
             statements,
@@ -222,6 +226,10 @@ class SystemGrantsTest(unittest.TestCase):
         for system_schemas, table in [
             ([], "performance_schema.events_statements_summary_by_digest"),
             (["performance_schema"], "performance_schema.events_statements_*"),
+            (
+                ["performance_schema"],
+                "PERFORMANCE_SCHEMA.events_statements_summary_by_digest",
+            ),
             (["mysql"], "mysql.user"),
             (["sys"], "sys.sys_config"),
         ]:

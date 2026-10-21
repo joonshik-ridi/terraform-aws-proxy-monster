@@ -504,10 +504,14 @@ variable "target_credential_groups" {
     the base tables that exist when the function runs; a table created later needs another run.
     An entry that matches no table is skipped and reported in drop_tables_skipped, since MySQL
     refuses a grant on a missing table. MySQL keeps the table-level row across DROP TABLE, so a
-    table recreated under the same name inherits the grant. A performance_schema table may be
-    named as well when system_schemas includes performance_schema: TRUNCATE on a summary table
-    needs DROP, and the engine refuses DROP TABLE there, so the grant clears that one table and
-    nothing more. It takes an exact name, never a glob, and mysql and sys stay out.
+    table recreated under the same name inherits the grant.
+
+    Outside the group's schemas, drop_tables may also name a performance_schema table when
+    system_schemas includes performance_schema, because TRUNCATE there needs DROP. The engine
+    refuses DROP TABLE on it, so the account can empty that table but not drop it; emptying the
+    digest summary also empties its histogram. This path takes an exact name, never a glob, and
+    no mysql or sys table. Some tables reset server state when emptied (host_cache, the setup_
+    tables), so name a summary or history table.
 
     global_privileges are granted ON *.*, the only unscoped grant this issues, because MySQL defines
     them at the global level only. PROCESS is what makes information_schema.INNODB_TRX readable and
