@@ -50,7 +50,9 @@ MYSQL_USERS_SQL = (
     "  WHERE d.User = u.User AND d.Host = u.Host AND d.Grant_priv = 'Y')"
     " FROM mysql.user u ORDER BY u.User, u.Host"
 )
-MYSQL_ROLE_EDGES_SQL = "SELECT TO_USER, TO_HOST, FROM_USER, FROM_HOST, WITH_ADMIN_OPTION FROM mysql.role_edges"
+MYSQL_ROLE_EDGES_SQL = (
+    "SELECT TO_USER, TO_HOST, FROM_USER, FROM_HOST, WITH_ADMIN_OPTION FROM mysql.role_edges"
+)
 MYSQL_NO_SUCH_TABLE = 1146
 POSTGRES_USERS_SQL = (
     "SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolvaliduntil"
@@ -387,9 +389,7 @@ def _validate(group: Group, password: Secret) -> None:
     if group.postgres_role_create and group.postgres_role is None:
         raise BootstrapError("postgres_role_create needs postgres_role")
     if group.postgres_role_database_privileges and not group.postgres_role_create:
-        raise BootstrapError(
-            "postgres_role_database_privileges needs postgres_role_create"
-        )
+        raise BootstrapError("postgres_role_database_privileges needs postgres_role_create")
     if not set(group.postgres_role_database_privileges) <= POSTGRES_DATABASE_PRIVILEGES:
         raise BootstrapError(
             "postgres_role_database_privileges must be among "
@@ -949,11 +949,7 @@ def _provision_postgres_inherited(
     ) as connection:
         cursor = connection.cursor()
         try:
-            created = (
-                _create_postgres_owner(cursor, group)
-                if group.postgres_role_create
-                else []
-            )
+            created = _create_postgres_owner(cursor, group) if group.postgres_role_create else []
             exists = _check_postgres_inheritance(cursor, group)
             username = _quote_ident(group.username)
             if not exists:
@@ -971,9 +967,7 @@ def _provision_postgres_inherited(
         except BaseException:
             connection.rollback()
             raise
-    return created + [
-        f"ROLE {group.postgres_role}: INHERIT TRUE, SET TRUE, ADMIN FALSE"
-    ]
+    return created + [f"ROLE {group.postgres_role}: INHERIT TRUE, SET TRUE, ADMIN FALSE"]
 
 
 def _create_postgres_owner(cursor: Any, group: Group) -> list[str]:
@@ -987,9 +981,7 @@ def _create_postgres_owner(cursor: Any, group: Group) -> list[str]:
         raise BootstrapError("postgres_role_create needs postgres_role")
     role = _quote_ident(group.postgres_role)
     created = []
-    cursor.execute(
-        "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s", (group.postgres_role,)
-    )
+    cursor.execute("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s", (group.postgres_role,))
     if cursor.fetchone() is None:
         cursor.execute(f"CREATE ROLE {role} NOLOGIN")
         created.append(f"CREATE ROLE {group.postgres_role}")
@@ -999,12 +991,8 @@ def _create_postgres_owner(cursor: Any, group: Group) -> list[str]:
             (group.postgres_role, privilege),
         )
         if not cursor.fetchone()[0]:
-            cursor.execute(
-                f'GRANT {privilege} ON DATABASE "{group.database}" TO {role}'
-            )
-            created.append(
-                f"GRANT {privilege} ON DATABASE {group.database} TO {group.postgres_role}"
-            )
+            cursor.execute(f'GRANT {privilege} ON DATABASE "{group.database}" TO {role}')
+            created.append(f"GRANT {privilege} ON DATABASE {group.database} TO {group.postgres_role}")
     missing = []
     for schema in group.schemas:
         cursor.execute(
