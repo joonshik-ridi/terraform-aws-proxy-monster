@@ -504,7 +504,10 @@ variable "target_credential_groups" {
     the base tables that exist when the function runs; a table created later needs another run.
     An entry that matches no table is skipped and reported in drop_tables_skipped, since MySQL
     refuses a grant on a missing table. MySQL keeps the table-level row across DROP TABLE, so a
-    table recreated under the same name inherits the grant.
+    table recreated under the same name inherits the grant. A performance_schema table may be
+    named as well when system_schemas includes performance_schema: TRUNCATE on a summary table
+    needs DROP, and the engine refuses DROP TABLE there, so the grant clears that one table and
+    nothing more. It takes an exact name, never a glob, and mysql and sys stay out.
 
     global_privileges are granted ON *.*, the only unscoped grant this issues, because MySQL defines
     them at the global level only. PROCESS is what makes information_schema.INNODB_TRX readable and
@@ -699,10 +702,13 @@ variable "target_credential_groups" {
     condition = alltrue([
       for group in var.target_credential_groups : alltrue([
         for table in group.drop_tables :
-        group.engine == "mysql" && can(regex("^[A-Za-z0-9_]{1,64}\\.[A-Za-z0-9_*]{1,64}$", table)) && can(regex("[A-Za-z0-9_]", split(".", table)[1])) && contains(group.schemas, split(".", table)[0])
+        group.engine == "mysql" && can(regex("^[A-Za-z0-9_]{1,64}\\.[A-Za-z0-9_*]{1,64}$", table)) && can(regex("[A-Za-z0-9_]", split(".", table)[1])) && (
+          contains(group.schemas, split(".", table)[0]) ||
+          (split(".", table)[0] == "performance_schema" && contains(group.system_schemas, "performance_schema") && can(regex("^[A-Za-z0-9_]{1,64}$", split(".", table)[1])))
+        )
       ])
     ])
-    error_message = "target_credential_groups[*].drop_tables must be schema.table names or \"*\" globs (never a bare \"*\") within the group's schemas on MySQL and empty on PostgreSQL: they are interpolated into SQL, and DROP is not a grantable privilege on PostgreSQL."
+    error_message = "target_credential_groups[*].drop_tables must be schema.table names or \"*\" globs (never a bare \"*\") within the group's schemas, or a performance_schema table named exactly when system_schemas includes performance_schema, on MySQL and empty on PostgreSQL: they are interpolated into SQL, and DROP is not a grantable privilege on PostgreSQL."
   }
 
   validation {

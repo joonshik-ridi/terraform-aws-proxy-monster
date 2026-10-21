@@ -368,9 +368,19 @@ def _validate(group: Group, password: Secret) -> None:
         if privilege not in GLOBAL_PRIVILEGES:
             raise BootstrapError("group global privilege is not grantable ON *.*")
     for table in group.drop_tables:
-        if not DROP_TABLE.match(table) or table.partition(".")[0] not in group.schemas:
+        schema, _, name = table.partition(".")
+        # TRUNCATE on a summary table needs DROP; a glob would reach every one of them.
+        named_performance_schema_table = (
+            schema == "performance_schema"
+            and schema in group.system_schemas
+            and BARE_IDENTIFIER.match(name)
+        )
+        if not DROP_TABLE.match(table) or not (
+            schema in group.schemas or named_performance_schema_table
+        ):
             raise BootstrapError(
                 "group drop table is not schema.table within the group's schemas"
+                " or a named performance_schema table it reads"
             )
     if group.engine != "mysql" and (
         group.system_schemas
