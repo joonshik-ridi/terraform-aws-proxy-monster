@@ -369,7 +369,7 @@ def _validate(group: Group, password: Secret) -> None:
             raise BootstrapError("group global privilege is not grantable ON *.*")
     for table in group.drop_tables:
         schema, _, name = table.partition(".")
-        # TRUNCATE on a performance_schema table needs DROP; a glob would reach every table there.
+        # TRUNCATE there needs DROP; a glob could reach host_cache or setup_actors.
         named_performance_schema_table = (
             schema == "performance_schema"
             and schema in group.system_schemas

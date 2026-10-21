@@ -508,10 +508,11 @@ variable "target_credential_groups" {
 
     Outside the group's schemas, drop_tables may also name a performance_schema table when
     system_schemas includes performance_schema, because TRUNCATE there needs DROP. The engine
-    refuses DROP TABLE on it, so the account can empty that table but not drop it; emptying the
-    digest summary also empties its histogram. This path takes an exact name, never a glob, and
-    no mysql or sys table. Some tables reset server state when emptied (host_cache, the setup_
-    tables), so name a summary or history table.
+    refuses DROP TABLE on it, so the account can empty that table but not drop it; emptying
+    events_statements_summary_by_digest also empties events_statements_histogram_by_digest. This
+    path takes an exact name, never a glob, and no mysql or sys table. Some tables reset server
+    state when emptied (host_cache, setup_actors, setup_objects), so name a summary or history
+    table.
 
     global_privileges are granted ON *.*, the only unscoped grant this issues, because MySQL defines
     them at the global level only. PROCESS is what makes information_schema.INNODB_TRX readable and
