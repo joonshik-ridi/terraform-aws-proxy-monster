@@ -230,6 +230,12 @@ class SystemGrantsTest(unittest.TestCase):
                 ["performance_schema"],
                 "PERFORMANCE_SCHEMA.events_statements_summary_by_digest",
             ),
+            (["performance_schema"], "performance_schema.setup_actors"),
+            (["performance_schema"], "performance_schema.host_cache"),
+            (
+                ["performance_schema"],
+                "performance_schema.events_statements_histogram_by_digest",
+            ),
             (["mysql"], "mysql.user"),
             (["sys"], "sys.sys_config"),
         ]:

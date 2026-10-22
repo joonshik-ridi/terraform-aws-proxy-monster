@@ -201,6 +201,24 @@ run "performance_schema_drop_glob_is_rejected" {
   expect_failures = [var.target_credential_groups]
 }
 
+run "performance_schema_setup_table_drop_is_rejected" {
+  command = plan
+  variables {
+    datasources = {
+      app = { engine = "mysql", wire_port = 40001, credential_group = "app", target = { host = "app.cluster-x.us-east-1.rds.amazonaws.com", port = 3306, db = "app" } }
+    }
+    bootstrap_client_host_pattern = "10.0.%"
+    target_credential_groups = {
+      app = {
+        aws_account_id = "222222222222", aws_account_alias = "data", rds_kind = "cluster", rds_identifier = "app"
+        engine         = "mysql", database = "app", schemas = ["app"], system_schemas = ["performance_schema"]
+        drop_tables    = ["performance_schema.setup_actors"]
+      }
+    }
+  }
+  expect_failures = [var.target_credential_groups]
+}
+
 run "mysql_system_table_drop_is_rejected" {
   command = plan
   variables {
